@@ -87,6 +87,18 @@ if __name__ == '__main__':
     device = torch.device('mps' if torch.backends.mps.is_built() else 'cpu')
     net = FresUNet(input_nbr=6, label_nbr=2).to(device)
 
+    # Load pre-trained model
+    pretrained_path = 'fresunet3_final.pth.tar'
+    if os.path.exists(pretrained_path):
+        print(f"[INFO] Loading pre-trained model from {pretrained_path}")
+        checkpoint = torch.load(pretrained_path, map_location=device)
+        if 'state_dict' in checkpoint:
+            net.load_state_dict(checkpoint['state_dict'])
+        else:
+            net.load_state_dict(checkpoint)
+    else:
+        print(f"[WARNING] Pre-trained model not found at {pretrained_path}, starting from scratch")
+
     if args.train:
         # Create datasets
         train_ds = ChangeDetectionDataset(args.root, TRAIN_CITIES[:10], augment=True, require_mask=True)
