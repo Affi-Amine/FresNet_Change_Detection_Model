@@ -34,3 +34,6 @@ runs/
 # Environment files
 .env
 .env.*
+
+*.pth
+*.tar

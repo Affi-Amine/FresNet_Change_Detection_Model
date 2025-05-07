@@ -8,17 +8,37 @@ import torch
 from torch.utils.data import Dataset
 from torchvision import transforms
 
+# Fixed size for all images/masks
 FIXED_SIZE = (256, 256)
 
+# Normalization values (ImageNet / common RGB)
+normalize = transforms.Normalize(
+    mean=[0.485, 0.456, 0.406],
+    std =[0.229, 0.224, 0.225]
+)
+
+# Transforms for inference (resize + tensor + normalize)
 base_transform = transforms.Compose([
     transforms.Resize(FIXED_SIZE, interpolation=Image.BILINEAR),
+    transforms.ToTensor(),
+    normalize,
 ])
+
+# Transforms for training (resize, augment, tensor, normalize)
 augmentation = transforms.Compose([
     transforms.Resize(FIXED_SIZE, interpolation=Image.BILINEAR),
     transforms.RandomHorizontalFlip(0.5),
     transforms.RandomVerticalFlip(0.5),
     transforms.RandomRotation(90),
     transforms.ColorJitter(0.2, 0.2, 0.2, 0.1),
+    transforms.ToTensor(),
+    normalize,
+])
+
+# Transform for mask only (resize + tensor, no normalization)
+mask_transform = transforms.Compose([
+    transforms.Resize(FIXED_SIZE, interpolation=Image.NEAREST),
+    transforms.ToTensor(),
 ])
 
 class ChangeDetectionDataset(Dataset):
@@ -26,8 +46,7 @@ class ChangeDetectionDataset(Dataset):
         """
         root_dir/
           images/OSCD/<city>/pair/img1.png, img2.png
-          train_labels/OSCD/<city>/cm/city-cm.tif or .png
-        require_mask: if False (inference), allow missing masks
+          train_labels/OSCD/<city>/cm/<city>-cm.tif or .png
         """
         self.augment = augment
         self.require_mask = require_mask
@@ -36,13 +55,12 @@ class ChangeDetectionDataset(Dataset):
         for city in cities:
             pair_dir = os.path.join(root_dir, 'images', 'OSCD', city, 'pair')
             mask_dir = os.path.join(root_dir, 'train_labels', 'OSCD', city, 'cm')
-            # mask could be either .tif or .png
             tif = os.path.join(mask_dir, f"{city}-cm.tif")
-            png = os.path.join(mask_dir, f"{city}-cm.png")
+            png = os.path.join(mask_dir, "cm.png")
             mask_file = png if os.path.isfile(png) else tif
 
             if not os.path.isdir(pair_dir):
-                warnings.warn(f"[dataset] Missing pair/ for city {city}: {pair_dir}")
+                warnings.warn(f"[dataset] Missing pair/ for {city}: {pair_dir}")
                 continue
 
             img1 = os.path.join(pair_dir, 'img1.png')
@@ -55,19 +73,20 @@ class ChangeDetectionDataset(Dataset):
                 warnings.warn(f"[dataset] Missing mask for {city}: {mask_file}")
                 continue
 
-            # if mask not required, allow None
+            # Append (img1, img2, mask or None)
             self.samples.append((img1, img2, mask_file if os.path.isfile(mask_file) else None))
 
         if not self.samples:
-            raise RuntimeError("No valid samples found – check your paths.")
+            raise RuntimeError("No valid samples found – check your `pair` and `cm` paths.")
 
-        self.dup_count = len(self.samples)
+        # only use duplicates when training with masks
+        self.dup_count = len(self.samples) if self.require_mask else 0
 
     def __len__(self):
-        return len(self.samples) + (self.dup_count if self.require_mask else 0)
+        return len(self.samples) + self.dup_count
 
     def __getitem__(self, idx):
-        # handle duplicates only when mask required (training)
+        # duplicate no-change samples only when require_mask=True
         if self.require_mask and idx >= len(self.samples):
             idx0 = idx - len(self.samples)
             img1_path, _, _ = self.samples[idx0]
@@ -83,25 +102,25 @@ class ChangeDetectionDataset(Dataset):
             else:
                 mask = None
 
-        # transforms
+        # apply transforms
         if self.augment:
             img1 = augmentation(img1)
             img2 = augmentation(img2)
             if mask is not None:
-                mask = augmentation(mask)
+                mask = mask_transform(mask)
         else:
             img1 = base_transform(img1)
             img2 = base_transform(img2)
             if mask is not None:
-                mask = base_transform(mask)
+                mask = mask_transform(mask)
 
-        # to tensor
-        to_t = transforms.functional.to_tensor
-        img1 = to_t(img1).float()
-        img2 = to_t(img2).float()
+        # prepare tensors
+        # img1, img2 are already (C,H,W) float tensors normalized
         if mask is not None:
-            mask = (to_t(mask) > 0.5).long().squeeze(0)
+            # mask_transform gives a float tensor in [0,1], convert to long 0/1
+            mask = (mask > 0.5).long().squeeze(0)
         else:
-            mask = torch.zeros(FIXED_SIZE, dtype=torch.long)  # dummy for inference
+            # create dummy mask of zeros
+            mask = torch.zeros(FIXED_SIZE, dtype=torch.long)
 
         return img1, img2, mask
