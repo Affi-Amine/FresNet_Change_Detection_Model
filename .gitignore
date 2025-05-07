@@ -1,0 +1,36 @@
+.DS_Store
+Icon?
+
+# Python cache and artifacts
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.swp
+
+# Virtual environment
+myenv/
+env/
+venv/
+
+# IDEs and editors
+.idea/
+.vscode/
+
+# Data and outputs
+data/
+checkpoints/
+outputs/
+
+# Logs, coverage, and TensorBoard
+*.log
+htmlcov/
+.coverage
+runs/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Environment files
+.env
+.env.*
