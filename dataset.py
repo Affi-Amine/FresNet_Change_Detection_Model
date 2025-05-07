@@ -26,12 +26,12 @@ base_transform = transforms.Compose([
 
 # Additional augmentations for training
 spatial_transforms = transforms.Compose([
-    transforms.RandomHorizontalFlip(0.5),
-    transforms.RandomVerticalFlip(0.5),
-    transforms.RandomRotation(90),
+    transforms.RandomHorizontalFlip(0.3),
+    transforms.RandomVerticalFlip(0.3),
+    transforms.RandomRotation(45),
 ])
 
-color_transforms = transforms.ColorJitter(0.2, 0.2, 0.2, 0.1)
+color_transforms = transforms.ColorJitter(0.1, 0.1, 0.1, 0.05)
 
 # Transform for mask only (resize + tensor, no normalization)
 mask_transform = transforms.Compose([
