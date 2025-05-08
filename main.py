@@ -74,6 +74,32 @@ def evaluate_model(net, loader, device, desc="Eval"):
     print(f"{desc} Average → P={avg[0]:.3f}, R={avg[1]:.3f}, IoU={avg[2]:.3f}, F1={avg[3]:.3f}, OA={avg[4]:.3f}")
     return avg
 
+def dice_loss(pred, target, smooth=1.0):
+    """Calculate Dice loss for segmentation."""
+    pred = pred.sigmoid()  # Convert logits to probabilities
+    pred = pred.view(-1)
+    target = target.view(-1)
+    
+    intersection = (pred * target).sum()
+    dice = (2. * intersection + smooth) / (pred.sum() + target.sum() + smooth)
+    return 1 - dice
+
+def combined_loss(pred, target, pos_weight, alpha=0.5, beta=0.5):
+    """
+    Combined BCE and Dice loss with class weights.
+    
+    Args:
+        pred: Model predictions (logits)
+        target: Ground truth
+        pos_weight: Weight for positive class
+        alpha: Weight for BCE loss
+        beta: Weight for Dice loss
+    """
+    bce = torch.nn.BCEWithLogitsLoss(pos_weight=pos_weight)
+    bce_loss = bce(pred, target)
+    dice = dice_loss(pred, target)
+    return alpha * bce_loss + beta * dice
+
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('--root', required=True, help='Path to data/')
@@ -117,8 +143,9 @@ if __name__ == '__main__':
                                                              factor=0.5, patience=3, min_lr=1e-6)
         
         # Get class weights for loss function
-        pos_weight = train_ds.get_pos_weight() * 0.95  # Less aggressive reduction
-        criterion = torch.nn.BCEWithLogitsLoss(pos_weight=torch.tensor([pos_weight], dtype=torch.float32).to(device))
+        pos_weight = train_ds.get_pos_weight() * 0.9  # Slightly more balanced
+        pos_weight = torch.tensor([pos_weight], dtype=torch.float32).to(device)
+        criterion = lambda pred, target: combined_loss(pred, target, pos_weight, alpha=0.5, beta=0.5)
         early_stopping = EarlyStopping(patience=args.patience)
 
         best_val_f1 = 0
