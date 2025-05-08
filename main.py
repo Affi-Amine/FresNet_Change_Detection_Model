@@ -79,6 +79,7 @@ if __name__ == '__main__':
     parser.add_argument('--root', required=True, help='Path to data/')
     parser.add_argument('--train', action='store_true', help='Train the model')
     parser.add_argument('--eval-train', action='store_true', help='Evaluate on TRAIN_CITIES')
+    parser.add_argument('--eval-val', action='store_true', help='Evaluate on validation cities')
     parser.add_argument('--epochs', type=int, default=50)
     parser.add_argument('--batch-size', type=int, default=8, help='Batch size for training')
     parser.add_argument('--patience', type=int, default=7, help='Early stopping patience')
@@ -172,6 +173,64 @@ if __name__ == '__main__':
         ds = ChangeDetectionDataset(args.root, TRAIN_CITIES, augment=False, require_mask=True)
         loader = DataLoader(ds, batch_size=1, shuffle=False, num_workers=2, collate_fn=custom_collate)
         evaluate_model(net, loader, device, "Train Eval")
+
+    elif args.eval_val:
+        # Evaluate on validation cities
+        val_cities = TRAIN_CITIES[10:]  # Using the validation split
+        ds = ChangeDetectionDataset(args.root, val_cities, augment=False, require_mask=True)
+        loader = DataLoader(ds, batch_size=1, shuffle=False, num_workers=2, collate_fn=custom_collate)
+        
+        # Load best weights
+        checkpoint_path = 'checkpoints/fresunet_best.pth'
+        if os.path.exists(checkpoint_path):
+            print(f"[INFO] Loading trained model from {checkpoint_path}")
+            net.load_state_dict(torch.load(checkpoint_path, map_location=device))
+        else:
+            print(f"[WARNING] No trained model found at {checkpoint_path}, using pre-trained model")
+        
+        net.eval()
+        os.makedirs('outputs', exist_ok=True)
+        
+        print("\n[INFO] Validation Results:")
+        all_metrics = []
+        best_f1 = -1
+        best_city = None
+        best_pred = None
+        best_gt = None
+        
+        for idx, (im1, im2, gt) in enumerate(loader):
+            im1, im2 = im1.to(device), im2.to(device)
+            with torch.no_grad():
+                out = net(im1, im2)
+                _, pred = torch.max(out, 1)
+            
+            p_np = pred.cpu().numpy().squeeze().astype(np.uint8)
+            gt_np = gt.numpy().squeeze().astype(np.uint8)
+            
+            # Calculate metrics
+            m = compute_metrics_np(p_np, gt_np)
+            city = val_cities[idx]
+            print(f"{city}: P={m[0]:.3f}, R={m[1]:.3f}, IoU={m[2]:.3f}, F1={m[3]:.3f}, OA={m[4]:.3f}")
+            
+            # Save if best F1 score
+            if m[3] > best_f1:
+                best_f1 = m[3]
+                best_city = city
+                best_pred = p_np
+                best_gt = gt_np
+            
+            all_metrics.append(m)
+        
+        # Print average and best metrics
+        avg = np.mean(all_metrics, axis=0)
+        print(f"\nValidation Average → P={avg[0]:.3f}, R={avg[1]:.3f}, IoU={avg[2]:.3f}, F1={avg[3]:.3f}, OA={avg[4]:.3f}")
+        print(f"\nBest performing city: {best_city} (F1={best_f1:.3f})")
+        
+        # Save best prediction and ground truth
+        from PIL import Image
+        Image.fromarray((best_pred*255)).save(f"outputs/{best_city}_pred.png")
+        Image.fromarray((best_gt*255)).save(f"outputs/{best_city}_gt.png")
+        print(f"\nSaved best prediction and ground truth for {best_city} in outputs/")
 
     else:
         # Inference on TEST_CITIES
