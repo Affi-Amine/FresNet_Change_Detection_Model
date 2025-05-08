@@ -61,8 +61,10 @@ def evaluate_model(net, loader, device, desc="Eval"):
     for idx, (im1, im2, gt) in enumerate(loader):
         im1, im2 = im1.to(device), im2.to(device)
         with torch.no_grad():
-            out = net(im1, im2)
-            _, pred = torch.max(out, 1)
+            out = net(im1, im2)  # shape: [B, 2, H, W]
+            probs = torch.softmax(out, dim=1)  # shape: [B, 2, H, W]
+            change_prob = probs[:, 1, :, :]    # probability for "change" class
+            pred = (change_prob > 0.7).long()
         p_np = pred.cpu().numpy().squeeze().astype(np.uint8)
         gt_np = gt.numpy().squeeze().astype(np.uint8)
         m = compute_metrics_np(p_np, gt_np)
