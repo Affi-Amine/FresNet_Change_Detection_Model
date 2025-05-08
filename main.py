@@ -111,12 +111,12 @@ if __name__ == '__main__':
                               num_workers=2, collate_fn=custom_collate)
 
         # Initialize training components
-        optimizer = torch.optim.Adam(net.parameters(), lr=1e-3)  
+        optimizer = torch.optim.Adam(net.parameters(), lr=1e-4, weight_decay=1e-5)  
         scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='max', 
                                                              factor=0.5, patience=3, min_lr=1e-6)
         
         # Get class weights for loss function
-        pos_weight = train_ds.get_pos_weight() * 0.8  # Reduce positive weight to improve precision
+        pos_weight = train_ds.get_pos_weight() * 0.95  # Less aggressive reduction
         criterion = torch.nn.BCEWithLogitsLoss(pos_weight=torch.tensor([pos_weight], dtype=torch.float32).to(device))
         early_stopping = EarlyStopping(patience=args.patience)
 
@@ -175,21 +175,36 @@ if __name__ == '__main__':
 
     else:
         # Inference on TEST_CITIES
-        ds = ChangeDetectionDataset(args.root, TEST_CITIES, augment=False, require_mask=False)
+        ds = ChangeDetectionDataset(args.root, TEST_CITIES, augment=False, require_mask=False)  # Don't require masks
         print(f"[INFO] Predicting on {len(ds)} test samples")
         loader = DataLoader(ds, batch_size=1, shuffle=False, num_workers=2, collate_fn=custom_collate)
 
-        # Load best weights
-        net.load_state_dict(torch.load('checkpoints/fresunet_best.pth', map_location=device))
+        # Load best weights from our training
+        checkpoint_path = 'checkpoints/fresunet_best.pth'
+        if os.path.exists(checkpoint_path):
+            print(f"[INFO] Loading trained model from {checkpoint_path}")
+            net.load_state_dict(torch.load(checkpoint_path, map_location=device))
+        else:
+            print(f"[WARNING] No trained model found at {checkpoint_path}, using pre-trained model")
+            
         net.eval()
-
         os.makedirs('outputs', exist_ok=True)
+        
+        print("\n[INFO] Generating predictions for test cities...")
         for idx, (im1, im2, _) in enumerate(loader):
             im1, im2 = im1.to(device), im2.to(device)
             with torch.no_grad():
                 out = net(im1, im2)
                 _, pred = torch.max(out, 1)
+            
             p_np = pred.cpu().numpy().squeeze().astype(np.uint8)
+            
+            # Save prediction
+            city_name = TEST_CITIES[idx]
             from PIL import Image
-            Image.fromarray((p_np*255)).save(f"outputs/pred_{idx:03d}.png")
-        print("[INFO] Test predictions saved in outputs/")
+            pred_path = f"outputs/{city_name}_pred.png"
+            Image.fromarray((p_np*255)).save(pred_path)
+            print(f"Saved prediction for {city_name} to {pred_path}")
+
+        print("\n[INFO] Test predictions saved in outputs/")
+        print("[NOTE] Ground truth masks not available for test cities - metrics cannot be calculated")
