@@ -143,7 +143,7 @@ if __name__ == '__main__':
                                                              factor=0.5, patience=3, min_lr=1e-6)
         
         # Get class weights for loss function
-        pos_weight = train_ds.get_pos_weight() * 0.9  # Slightly more balanced
+        pos_weight = train_ds.get_pos_weight() * 2.0  # Try 2.0, 3.0, or higher
         pos_weight = torch.tensor([pos_weight], dtype=torch.float32).to(device)
         criterion = lambda pred, target: combined_loss(pred, target, pos_weight, alpha=0.5, beta=0.5)
         early_stopping = EarlyStopping(patience=args.patience)
