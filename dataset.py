@@ -54,7 +54,7 @@ class ChangeDetectionDataset(Dataset):
 
         for city in cities:
             pair_dir = os.path.join(root_dir, 'images', 'OSCD', city, 'pair')
-            mask_dir = os.path.join(root_dir, 'train_labels', 'OSCD', city, 'cm')
+            mask_dir = os.path.join(root_dir, 'train_labels', 'Onera Satellite Change Detection dataset - Train Labels', city, 'cm')
             tif = os.path.join(mask_dir, f"{city}-cm.tif")
             png = os.path.join(mask_dir, "cm.png")
             mask_file = png if os.path.isfile(png) else tif

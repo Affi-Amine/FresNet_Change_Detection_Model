@@ -113,7 +113,7 @@ if __name__ == '__main__':
     parser.add_argument('--patience', type=int, default=7, help='Early stopping patience')
     args = parser.parse_args()
 
-    device = torch.device('mps' if torch.backends.mps.is_built() else 'cpu')
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     net = FresUNet(input_nbr=6, label_nbr=2).to(device)
 
     # Load pre-trained model
