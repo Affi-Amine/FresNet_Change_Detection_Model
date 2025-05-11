@@ -145,9 +145,9 @@ if __name__ == '__main__':
                                                              factor=0.5, patience=3, min_lr=1e-6)
         
         # Get class weights for loss function
-        pos_weight = train_ds.get_pos_weight() * 2.0  # Try 2.0, 3.0, or higher
-        pos_weight = torch.tensor([pos_weight], dtype=torch.float32).to(device)
-        criterion = lambda pred, target: combined_loss(pred, target, pos_weight, alpha=0.5, beta=0.5)
+        pw = train_ds.get_pos_weight() * 6.0 
+        weights = torch.tensor([1.0, pw], dtype=torch.float32, device=device)
+        criterion = torch.nn.CrossEntropyLoss(weight=weights)
         early_stopping = EarlyStopping(patience=args.patience)
 
         best_val_f1 = 0
@@ -159,10 +159,7 @@ if __name__ == '__main__':
                 im1, im2, m = im1.to(device), im2.to(device), m.to(device)
                 optimizer.zero_grad()
                 out = net(im1, im2)
-                # Get logits for positive class (change) only
-                out = out[:, 1]  # Take channel 1 (positive class)
-                m = m.float()  # Convert target to float for BCE loss
-                loss = criterion(out, m)
+                loss = criterion(out, m.long()) # m: LongTensor with values 0 or 1
                 loss.backward()
                 torch.nn.utils.clip_grad_norm_(net.parameters(), max_norm=1.0)
                 optimizer.step()
