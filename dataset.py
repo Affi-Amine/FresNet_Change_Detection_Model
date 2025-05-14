@@ -25,13 +25,19 @@ base_transform = transforms.Compose([
 ])
 
 # Additional augmentations for training
+# Enhanced augmentations for better small change detection
 spatial_transforms = transforms.Compose([
-    transforms.RandomHorizontalFlip(0.3),
-    transforms.RandomVerticalFlip(0.3),
-    transforms.RandomRotation(45),
+    transforms.RandomHorizontalFlip(0.5),  # Increased probability
+    transforms.RandomVerticalFlip(0.5),    # Increased probability
+    transforms.RandomRotation(90),         # Increased rotation range
+    transforms.RandomAffine(degrees=0, translate=(0.1, 0.1), scale=(0.9, 1.1)),  # Added affine transform
 ])
 
-color_transforms = transforms.ColorJitter(0.1, 0.1, 0.1, 0.05)
+# Enhanced color transforms for better robustness
+color_transforms = transforms.Compose([
+    transforms.ColorJitter(brightness=0.2, contrast=0.2, saturation=0.2, hue=0.05),
+    transforms.GaussianBlur(kernel_size=3, sigma=(0.1, 1.0)),  # Add occasional blur
+])
 
 # Transform for mask only (resize + tensor, no normalization)
 mask_transform = transforms.Compose([
@@ -49,6 +55,8 @@ class ChangeDetectionDataset(Dataset):
         self.augment = augment
         self.require_mask = require_mask
         self.samples = []
+        self.num_workers = min(8, os.cpu_count())
+        self.prefetch_factor = 2 if self.num_workers > 0 else None
         self.pos_weight = 0  # To track class balance
         self.total_pixels = 0
 
@@ -132,8 +140,10 @@ class ChangeDetectionDataset(Dataset):
             mask = torch.zeros(FIXED_SIZE, dtype=torch.long)
 
         # Ensure all tensors are contiguous
+        # Remove .pin_memory() calls
         return img1.contiguous(), img2.contiguous(), mask.contiguous()
 
     def get_pos_weight(self):
         """Returns the positive class weight for weighted loss"""
-        return self.pos_weight
+        # Increase the multiplier to focus more on the rare positive class
+        return min(self.pos_weight * 20.0, 50.0)  # Increased multiplier and cap
