@@ -356,7 +356,7 @@ def evaluate_model(net, loader, device, desc="Eval", save_path=None, threshold=0
                 
                 # Convert back to tensor
                 pred = torch.from_numpy(cleaned.astype(np.int64)).to(device)
-        
+     
         p_np = pred.cpu().numpy().squeeze().astype(np.uint8)
         gt_np = gt.numpy().squeeze().astype(np.uint8)
         
