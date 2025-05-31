@@ -1,139 +1,156 @@
-# dataset.py
-
 import os
-import warnings
-import numpy as np
-from PIL import Image
 import torch
 from torch.utils.data import Dataset
+from PIL import Image
+import numpy as np
 from torchvision import transforms
-
-# Fixed size for all images/masks
-FIXED_SIZE = (256, 256)
-
-# Normalization values (ImageNet / common RGB)
-normalize = transforms.Normalize(
-    mean=[0.485, 0.456, 0.406],
-    std=[0.229, 0.224, 0.225]
-)
-
-# Base transforms for both training and evaluation
-base_transform = transforms.Compose([
-    transforms.Resize(FIXED_SIZE, interpolation=Image.BILINEAR),
-    transforms.ToTensor(),
-    normalize,
-])
-
-# Additional augmentations for training
-spatial_transforms = transforms.Compose([
-    transforms.RandomHorizontalFlip(0.3),
-    transforms.RandomVerticalFlip(0.3),
-    transforms.RandomRotation(45),
-])
-
-color_transforms = transforms.ColorJitter(0.1, 0.1, 0.1, 0.05)
-
-# Transform for mask only (resize + tensor, no normalization)
-mask_transform = transforms.Compose([
-    transforms.Resize(FIXED_SIZE, interpolation=Image.NEAREST),
-    transforms.ToTensor(),
-])
+from datetime import datetime
 
 class ChangeDetectionDataset(Dataset):
-    def __init__(self, root_dir, cities, augment=True, require_mask=True):
-        """
-        root_dir/
-          images/OSCD/<city>/pair/img1.png, img2.png
-          train_labels/OSCD/<city>/cm/<city>-cm.tif or .png
-        """
+    def __init__(self, root, cities, transform=None, augment=False, require_mask=False, return_time=False, use_all_bands=False):
+        self.root = root
+        self.cities = cities
+        self.transform = transform
+        self.use_all_bands = use_all_bands
+        # If no transform is provided, use a default one to convert to tensor
+        self.default_transform = transforms.Compose([
+            transforms.Resize((256, 256), interpolation=transforms.InterpolationMode.BILINEAR),  # Force square resize
+            transforms.ToTensor(),
+            transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])  # Common normalization for RGB images
+        ]) if transform is None else transform
         self.augment = augment
         self.require_mask = require_mask
-        self.samples = []
-        self.pos_weight = 0  # To track class balance
-        self.total_pixels = 0
+        self.return_time = return_time
+        self.imgs1 = []
+        self.imgs2 = []
+        self.labels = []
+        self.time_diffs = []
+        self.names = []
+
+        # Define augmentation transforms if augment is True
+        self.augmentation = transforms.Compose([
+            transforms.RandomHorizontalFlip(p=0.5),
+            transforms.RandomVerticalFlip(p=0.5),
+            transforms.ColorJitter(brightness=0.2, contrast=0.2, saturation=0.2),
+            transforms.RandomRotation(10),
+        ]) if augment else None
 
         for city in cities:
-            pair_dir = os.path.join(root_dir, 'images', 'OSCD', city, 'pair')
-            mask_dir = os.path.join(root_dir, 'train_labels', 'Onera Satellite Change Detection dataset - Train Labels', city, 'cm')
-            tif = os.path.join(mask_dir, f"{city}-cm.tif")
-            png = os.path.join(mask_dir, "cm.png")
-            mask_file = png if os.path.isfile(png) else tif
+            # Image paths
+            img1_path = os.path.join(root, "images", "OSCD", city, "pair", "img1.png")
+            img2_path = os.path.join(root, "images", "OSCD", city, "pair", "img2.png")
+            
+            # Label path (use the fixed single-channel label)
+            label_path = os.path.join(root, "train_labels", "Onera Satellite Change Detection dataset - Train Labels", city, "cm", "cm_fixed.png")
+            
+            # Time difference from dates.txt
+            dates_path = os.path.join(root, "images", "OSCD", city, "dates.txt")
+            if os.path.exists(dates_path):
+                with open(dates_path, 'r') as f:
+                    dates = f.read().strip().split('\n')
+                    # Parse dates in the format 'date_1: YYYYMMDD' and 'date_2: YYYYMMDD'
+                    try:
+                        date1_str = dates[0].split(": ")[1].strip()  # Extract YYYYMMDD
+                        date2_str = dates[1].split(": ")[1].strip()  # Extract YYYYMMDD
+                        # Convert to datetime objects
+                        date1 = datetime.strptime(date1_str, '%Y%m%d')
+                        date2 = datetime.strptime(date2_str, '%Y%m%d')
+                        # Compute difference in days and normalize to years
+                        time_diff = (date2 - date1).days / 365.25
+                    except (IndexError, ValueError, KeyError) as e:
+                        print(f"Warning: Could not parse dates for {city}, setting time_diff to 0.0. Error: {e}")
+                        time_diff = 0.0
+            else:
+                time_diff = 0.0
 
-            if not os.path.isdir(pair_dir):
-                warnings.warn(f"[dataset] Missing pair/ for {city}: {pair_dir}")
-                continue
-
-            img1 = os.path.join(pair_dir, 'img1.png')
-            img2 = os.path.join(pair_dir, 'img2.png')
-            if not os.path.isfile(img1) or not os.path.isfile(img2):
-                warnings.warn(f"[dataset] Missing img1/img2 in {pair_dir}")
-                continue
-
-            if self.require_mask:
-                if not os.path.isfile(mask_file):
-                    warnings.warn(f"[dataset] Missing mask for {city}: {mask_file}")
-                    continue
-                # Calculate class balance
-                mask = np.array(Image.open(mask_file).convert('L'))
-                self.total_pixels += mask.size
-                self.pos_weight += np.sum(mask > 0)
-
-            self.samples.append((img1, img2, mask_file if os.path.isfile(mask_file) else None))
-
-        if not self.samples:
-            raise RuntimeError("No valid samples found – check your `pair` and `cm` paths.")
-
-        # Calculate positive class weight for loss function
-        if self.require_mask and self.total_pixels > 0:
-            neg_samples = self.total_pixels - self.pos_weight
-            self.pos_weight = neg_samples / self.pos_weight if self.pos_weight > 0 else 1.0
+            if os.path.exists(img1_path) and os.path.exists(img2_path):
+                if not require_mask or (require_mask and os.path.exists(label_path)):
+                    self.imgs1.append(img1_path)
+                    self.imgs2.append(img2_path)
+                    self.time_diffs.append(time_diff)
+                    self.names.append(city)
+                    if os.path.exists(label_path):
+                        self.labels.append(label_path)
+                    else:
+                        self.labels.append(None)
 
     def __len__(self):
-        return len(self.samples)
+        return len(self.imgs1)
 
     def __getitem__(self, idx):
-        img1_path, img2_path, mask_path = self.samples[idx]
-        img1 = Image.open(img1_path)
-        img2 = Image.open(img2_path)
+        img1_path = self.imgs1[idx]
+        img2_path = self.imgs2[idx]
+        label_path = self.labels[idx]
+        time_diff = self.time_diffs[idx]
 
-        # Resize images first to ensure consistent size
-        img1 = transforms.Resize(FIXED_SIZE, interpolation=Image.BILINEAR)(img1)
-        img2 = transforms.Resize(FIXED_SIZE, interpolation=Image.BILINEAR)(img2)
+        # Load images (default to RGB for now)
+        img1 = Image.open(img1_path).convert('RGB')
+        img2 = Image.open(img2_path).convert('RGB')
 
-        # Convert to tensors
-        img1 = transforms.ToTensor()(img1)
-        img2 = transforms.ToTensor()(img2)
+        # Placeholder for multispectral data loading
+        if self.use_all_bands:
+            print(f"Warning: use_all_bands=True, but multispectral loading is not implemented. Using RGB instead.")
+            # TODO: Implement loading of multispectral bands (e.g., from TIF files)
 
-        # Apply augmentations during training
-        if self.augment:
-            # Stack images for spatial transforms to keep them aligned
-            stacked = torch.cat([img1, img2], dim=0)
-            # Apply same spatial transforms to both images
-            stacked = spatial_transforms(stacked)
-            img1, img2 = torch.split(stacked, 3, dim=0)
-            
-            # Apply color transforms separately
-            img1 = color_transforms(img1)
-            img2 = color_transforms(img2)
+        # Apply augmentation if enabled
+        if self.augment and self.augmentation:
+            seed = torch.randint(0, 2**32, (1,)).item()
+            torch.manual_seed(seed)
+            img1 = self.augmentation(img1)
+            torch.manual_seed(seed)  # Ensure same augmentation for img2
+            img2 = self.augmentation(img2)
 
-        # Apply normalization
-        img1 = normalize(img1)
-        img2 = normalize(img2)
+        # Apply transform (default or custom)
+        img1 = self.default_transform(img1)
+        img2 = self.default_transform(img2)
 
-        if mask_path:
-            mask = Image.open(mask_path).convert('L')
-            mask = transforms.Resize(FIXED_SIZE, interpolation=Image.NEAREST)(mask)
-            mask = transforms.ToTensor()(mask)
-            if self.augment:
-                mask = spatial_transforms(mask)
-            # Convert to binary mask
-            mask = (mask > 0.5).long().squeeze(0)
+        if label_path:
+            label = Image.open(label_path)
+            label = np.array(label, dtype=np.uint8)
+            # Ensure label is single-channel
+            if label.ndim > 2:
+                label = label[:, :, 0]  # Take the first channel as a fallback
+            # Resize label to match image size
+            label = Image.fromarray(label)
+            resize_transform = transforms.Resize((256, 256), interpolation=transforms.InterpolationMode.NEAREST)
+            label = resize_transform(label)
+            label = np.array(label, dtype=np.uint8)
+            # Convert to binary (0 or 1)
+            label = (label > 0).astype(np.uint8)
+            label = torch.from_numpy(label).long().unsqueeze(0)  # Add channel dimension [1, 256, 256]
+            print(f"Label shape after processing: {label.shape}")  # Debug print
         else:
-            mask = torch.zeros(FIXED_SIZE, dtype=torch.long)
+            label = torch.zeros((1, 256, 256), dtype=torch.long, device=img1.device)  # Dummy label with channel dimension
 
-        # Ensure all tensors are contiguous
-        return img1.contiguous(), img2.contiguous(), mask.contiguous()
+        if self.return_time:
+            return img1, img2, label, torch.tensor(time_diff, dtype=torch.float32), self.names[idx]
+        return img1, img2, label, self.names[idx]
 
     def get_pos_weight(self):
-        """Returns the positive class weight for weighted loss"""
-        return self.pos_weight
+        """
+        Compute the positive weight for the binary cross-entropy loss based on the class imbalance.
+        Returns the ratio of negative to positive pixels in the labels.
+        """
+        pos_pixels = 0
+        neg_pixels = 0
+
+        for label_path in self.labels:
+            if label_path is None:
+                continue
+            label = Image.open(label_path)
+            label = np.array(label, dtype=np.uint8)
+            # Ensure label is single-channel
+            if label.ndim > 2:
+                label = label[:, :, 0]  # Take the first channel as a fallback
+            # Resize label to match image size for consistency
+            label = Image.fromarray(label)
+            label = transforms.Resize((256, 256), interpolation=transforms.InterpolationMode.NEAREST)(label)
+            label = np.array(label, dtype=np.uint8)
+            # Convert to binary: 0 (no change), 1 (change)
+            label = (label > 0).astype(np.uint8)
+            pos_pixels += np.sum(label == 1)
+            neg_pixels += np.sum(label == 0)
+
+        if pos_pixels == 0:
+            return 1.0  # Avoid division by zero; use a neutral weight
+        return neg_pixels / pos_pixels
