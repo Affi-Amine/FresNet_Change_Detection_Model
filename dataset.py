@@ -4,7 +4,9 @@ from torch.utils.data import Dataset
 from PIL import Image
 import numpy as np
 from torchvision import transforms
+
 from datetime import datetime
+
 
 class ChangeDetectionDataset(Dataset):
     def __init__(self, root, cities, transform=None, augment=False, require_mask=False, return_time=False, use_all_bands=False):
@@ -20,6 +22,7 @@ class ChangeDetectionDataset(Dataset):
         ]) if transform is None else transform
         self.augment = augment
         self.require_mask = require_mask
+
         self.return_time = return_time
         self.imgs1 = []
         self.imgs2 = []
@@ -34,6 +37,7 @@ class ChangeDetectionDataset(Dataset):
             transforms.ColorJitter(brightness=0.2, contrast=0.2, saturation=0.2),
             transforms.RandomRotation(10),
         ]) if augment else None
+
 
         for city in cities:
             # Image paths
@@ -154,3 +158,4 @@ class ChangeDetectionDataset(Dataset):
         if pos_pixels == 0:
             return 1.0  # Avoid division by zero; use a neutral weight
         return neg_pixels / pos_pixels
+

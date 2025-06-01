@@ -1,3 +1,4 @@
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -60,6 +61,10 @@ class BasicBlock_ss(nn.Module):
         if self.doit:
             self.couple = nn.Conv2d(inplanes, planes, kernel_size=1)
             self.bnc = nn.BatchNorm2d(planes)
+        
+        self.use_attention = use_attention
+        if use_attention:
+            self.cbam = CBAM(planes)
 
     def forward(self, x):
         if self.doit:
@@ -79,6 +84,9 @@ class BasicBlock_ss(nn.Module):
         out = self.conv2(out)
         out = self.bn2(out)
         
+        if self.use_attention:
+            out = self.cbam(out)
+        
         out += residual
         out = self.relu(out)
         return out
@@ -87,6 +95,7 @@ class BasicBlock_us(nn.Module):
     def __init__(self, inplanes, upsamp=1):
         super(BasicBlock_us, self).__init__()
         planes = int(inplanes / upsamp)
+
         self.conv1 = nn.ConvTranspose2d(inplanes, planes, kernel_size=3, padding=1, stride=upsamp, output_padding=1)
         self.bn1 = nn.BatchNorm2d(planes)
         self.relu = nn.ReLU(inplace=True)
@@ -95,6 +104,10 @@ class BasicBlock_us(nn.Module):
         self.upsamp = upsamp
         self.couple = nn.ConvTranspose2d(inplanes, planes, kernel_size=3, padding=1, stride=upsamp, output_padding=1)
         self.bnc = nn.BatchNorm2d(planes)
+        
+        self.use_attention = use_attention
+        if use_attention:
+            self.cbam = CBAM(planes)
 
     def forward(self, x):
         residual = self.couple(x)
@@ -106,6 +119,9 @@ class BasicBlock_us(nn.Module):
         
         out = self.conv2(out)
         out = self.bn2(out)
+        
+        if self.use_attention:
+            out = self.cbam(out)
 
         out += residual
         out = self.relu(out)
@@ -121,6 +137,7 @@ class FresUNet(nn.Module):
         self.time_conv = nn.Conv2d(64, input_nbr, kernel_size=1)
 
         self.encres1_1 = BasicBlock_ss(input_nbr, planes=base_depth)
+
         cur_depth = base_depth
         d1 = base_depth
         self.encres1_2 = BasicBlock_ss(cur_depth, subsamp=2)
@@ -174,6 +191,7 @@ class FresUNet(nn.Module):
         time_emb = time_emb.expand(-1, -1, height, width)
         
         x = torch.cat((x1, x2), 1) + time_emb
+
         s1_1 = x.size()
         x1 = self.encres1_1(x)
         x = self.encres1_2(x1)
@@ -222,3 +240,4 @@ class FresUNet(nn.Module):
         change_pred = self.sm(change_pred)
         recon = self.recon_conv(recon_input)
         return change_pred, recon
+

@@ -1,16 +1,21 @@
+
 import os
 import argparse
 import numpy as np
 import torch
+import torch.nn as nn
+import torch.nn.functional as F
 from torch.utils.data import DataLoader
 from sklearn.metrics import confusion_matrix
-from fresunet import FresUNet
+from fresunet import AttentionFresUNet
 from dataset import ChangeDetectionDataset
 from scipy.ndimage import binary_opening, binary_closing
 import torch.nn as nn
 import torch.nn.functional as F
 import cv2
 
+
+# City lists
 TRAIN_CITIES = [
     'aguasclaras','bercy','bordeaux','nantes','paris','rennes','saclay_e',
     'abudhabi','cupertino','pisa','beihai','hongkong','beirut','mumbai'
@@ -28,6 +33,7 @@ def custom_collate(batch):
     return img1s, img2s, masks, time_diffs
 
 def compute_metrics_np(pred, gt):
+    """Compute Precision, Recall, IoU, F1, OA metrics"""
     tn, fp, fn, tp = confusion_matrix(gt.flatten(), pred.flatten(), labels=[0,1]).ravel()
     p = tp/(tp+fp) if tp+fp > 0 else 0
     r = tp/(tp+fn) if tp+fn > 0 else 0
@@ -47,24 +53,41 @@ class FocalLoss(nn.Module):
         focal_loss = ((1 - pt) ** self.gamma) * bce_loss
         return focal_loss.mean()
 
-class EarlyStopping:
-    def __init__(self, patience=7, min_delta=0):
-        self.patience = patience
-        self.min_delta = min_delta
-        self.counter = 0
-        self.best_loss = None
-        self.early_stop = False
 
-    def __call__(self, val_loss):
-        if self.best_loss is None:
-            self.best_loss = val_loss
-        elif val_loss > self.best_loss - self.min_delta:
-            self.counter += 1
-            if self.counter >= self.patience:
-                self.early_stop = True
-        else:
-            self.best_loss = val_loss
-            self.counter = 0
+class EarlyStopping:
+    """Early stopping to prevent overfitting. Stops if score doesn't improve."""
+    def __init__(self, patience=7, min_delta=0.0, mode='max'): # mode can be 'min' for loss or 'max' for F1/accuracy
+        self.patience = patience
+        self.min_delta = min_delta  # Minimum change to qualify as an improvement
+        self.counter = 0
+        self.best_score = None
+        self.early_stop = False
+        self.mode = mode
+        if self.mode not in ['min', 'max']:
+            raise ValueError("mode must be 'min' or 'max'")
+        
+        if self.mode == 'max':
+            self.best_score = -float('inf') # Initialize best_score appropriately for max mode
+        else: # mode == 'min'
+            self.best_score = float('inf')  # Initialize best_score appropriately for min mode
+
+    def __call__(self, current_score):
+        if self.mode == 'max':
+            if current_score > self.best_score + self.min_delta: # Score improved
+                self.best_score = current_score
+                self.counter = 0
+            else: # Score did not improve enough
+                self.counter += 1
+                if self.counter >= self.patience:
+                    self.early_stop = True
+        elif self.mode == 'min': # For loss
+            if current_score < self.best_score - self.min_delta: # Loss decreased
+                self.best_score = current_score
+                self.counter = 0
+            else: # Loss did not decrease enough
+                self.counter += 1
+                if self.counter >= self.patience:
+                    self.early_stop = True
 
 def apply_guided_filter(probs, img, radius=5, eps=0.1):
     h, w = probs.shape[1:]
@@ -331,6 +354,30 @@ if __name__ == '__main__':
         Image.fromarray((best_gt*255)).save(f"outputs/{best_city}_gt.png")
         print(f"\nSaved best prediction and ground truth for {best_city} in outputs/")
 
+
+def plot_training_progress(train_losses, val_f1_scores, save_path=None):
+    """Plot training loss and validation F1 scores"""
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 5))
+    
+    # Plot training loss
+    ax1.plot(train_losses, 'b-', label='Training Loss')
+    ax1.set_xlabel('Epoch')
+    ax1.set_ylabel('Loss')
+    ax1.set_title('Training Loss')
+    ax1.grid(True)
+    
+    # Plot validation F1 score
+    ax2.plot(val_f1_scores, 'r-', label='Validation F1')
+    ax2.set_xlabel('Epoch')
+    ax2.set_ylabel('F1 Score')
+    ax2.set_title('Validation F1 Score')
+    ax2.grid(True)
+    
+    plt.tight_layout()
+    
+    if save_path:
+        plt.savefig(save_path, dpi=150, bbox_inches='tight')
+        plt.close()
     else:
         ds = ChangeDetectionDataset(args.root, TEST_CITIES, augment=False, 
                                   require_mask=False, return_time=True, use_all_bands=args.use_all_bands)
@@ -371,5 +418,204 @@ if __name__ == '__main__':
                 Image.fromarray((p_np*255)).save(pred_path)
                 print(f"Saved prediction for {city_name} to {pred_path}")
 
-        print("\n[INFO] Test predictions saved in outputs/")
-        print("[NOTE] Ground truth masks not available for test cities - metrics cannot be calculated")
+
+def inference_with_test_time_augmentation(net, img1, img2, device, tta_flips=True, tta_scales=True, tta_rotations=True):
+    """Perform inference with test-time augmentation
+    
+    Args:
+        net: Network model
+        img1, img2: Input image tensors
+        device: Computation device
+        tta_flips: Apply horizontal and vertical flips
+        tta_scales: Apply scale augmentation
+        tta_rotations: Apply rotations
+        
+    Returns:
+        Average prediction probability
+    """
+    net.eval()
+    
+    # Original prediction
+    with torch.no_grad():
+        out = net(img1, img2)
+        prob = torch.softmax(out, dim=1)[:, 1, :, :]  # Change probability
+    
+    all_probs = [prob]
+    
+    # Test-time augmentation with flips
+    if tta_flips:
+        # Horizontal flip
+        img1_h = torch.flip(img1, dims=[3])
+        img2_h = torch.flip(img2, dims=[3])
+        with torch.no_grad():
+            out_h = net(img1_h, img2_h)
+            prob_h = torch.softmax(out_h, dim=1)[:, 1, :, :]
+        all_probs.append(torch.flip(prob_h, dims=[2]))
+        
+        # Vertical flip
+        img1_v = torch.flip(img1, dims=[2])
+        img2_v = torch.flip(img2, dims=[2])
+        with torch.no_grad():
+            out_v = net(img1_v, img2_v)
+            prob_v = torch.softmax(out_v, dim=1)[:, 1, :, :]
+        all_probs.append(torch.flip(prob_v, dims=[1]))
+        
+        # Both flips
+        img1_hv = torch.flip(img1, dims=[2, 3])
+        img2_hv = torch.flip(img2, dims=[2, 3])
+        with torch.no_grad():
+            out_hv = net(img1_hv, img2_hv)
+            prob_hv = torch.softmax(out_hv, dim=1)[:, 1, :, :]
+        all_probs.append(torch.flip(prob_hv, dims=[1, 2]))
+    
+    # Test-time augmentation with scales
+    if tta_scales:
+        # Scale down by 10%
+        scale_factor = 0.9
+        img1_s = F.interpolate(img1, scale_factor=scale_factor, mode='bilinear', align_corners=False)
+        img2_s = F.interpolate(img2, scale_factor=scale_factor, mode='bilinear', align_corners=False)
+        with torch.no_grad():
+            out_s = net(img1_s, img2_s)
+            prob_s = torch.softmax(out_s, dim=1)[:, 1, :, :]
+        
+        # Resize back to original
+        prob_s = F.interpolate(prob_s.unsqueeze(1), size=prob.shape[1:], mode='bilinear', align_corners=False).squeeze(1)
+        all_probs.append(prob_s)
+        
+        # Scale up by 10%
+        scale_factor = 1.1
+        img1_s = F.interpolate(img1, scale_factor=scale_factor, mode='bilinear', align_corners=False)
+        img2_s = F.interpolate(img2, scale_factor=scale_factor, mode='bilinear', align_corners=False)
+        # Crop to original size
+        _, _, h, w = img1.shape
+        img1_s = img1_s[:, :, :h, :w]
+        img2_s = img2_s[:, :, :h, :w]
+        with torch.no_grad():
+            out_s = net(img1_s, img2_s)
+            prob_s = torch.softmax(out_s, dim=1)[:, 1, :, :]
+        all_probs.append(prob_s)
+    
+    # Test-time augmentation with rotations
+    if tta_rotations:
+        # 90 degree rotation
+        img1_r = torch.rot90(img1, k=1, dims=[2, 3])
+        img2_r = torch.rot90(img2, k=1, dims=[2, 3])
+        with torch.no_grad():
+            out_r = net(img1_r, img2_r)
+            prob_r = torch.softmax(out_r, dim=1)[:, 1, :, :]
+        all_probs.append(torch.rot90(prob_r, k=3, dims=[1, 2]))  # Rotate back
+    
+    # Average all predictions
+    avg_prob = torch.stack(all_probs).mean(dim=0)
+    return avg_prob
+
+def main():
+    # Parse command line arguments
+    parser = argparse.ArgumentParser(description='Change Detection with FresUNet')
+    
+    # Data parameters
+    parser.add_argument('--root', type=str, required=True, help='Path to dataset root')
+    parser.add_argument('--batch-size', type=int, default=4, help='Batch size')
+    
+    # Model parameters
+    parser.add_argument('--pretrained', type=str, default='checkpoints/fresune3_old_best.pth', 
+                        help='Path to pretrained model')
+    
+    # Training parameters
+    parser.add_argument('--train', action='store_true', help='Train the model')
+    parser.add_argument('--epochs', type=int, default=50, help='Number of epochs')
+    parser.add_argument('--lr', type=float, default=1e-5, help='Learning rate')
+    parser.add_argument('--weight-decay', type=float, default=5e-5, help='Weight decay')
+    parser.add_argument('--patience', type=int, default=15, help='Patience for early stopping')
+    
+    # Loss function parameters
+    parser.add_argument('--focal-weight', type=float, default=0.4, help='Weight for focal loss')
+    parser.add_argument('--dice-weight', type=float, default=0.3, help='Weight for dice loss')
+    parser.add_argument('--boundary-weight', type=float, default=0.3, help='Weight for boundary loss')
+    parser.add_argument('--pos-weight-multiplier', type=float, default=10.0, help='Multiplier for positive class weight')
+    
+    # Evaluation parameters
+    parser.add_argument('--eval', action='store_true', help='Evaluate the model')
+    parser.add_argument('--test', action='store_true', help='Test on test set')
+    parser.add_argument('--output', type=str, default='outputs', help='Output directory')
+    
+    args = parser.parse_args()
+    
+    # Set device
+    device = torch.device('cuda' if torch.cuda.is_available() else 
+                         'mps' if torch.backends.mps.is_available() else 
+                         'cpu')
+    print(f"[INFO] Using device: {device}")
+    
+    # Create model
+    print("[INFO] Initializing FresUNet model")
+    
+    # Set batch norm momentum to a lower value for stability with small batches
+    def adjust_bn_momentum(module, momentum=0.1):
+        if isinstance(module, torch.nn.BatchNorm2d):
+            module.momentum = momentum
+    
+    net = AttentionFresUNet(input_nbr=6, label_nbr=2).to(device)
+    net.apply(lambda m: adjust_bn_momentum(m, momentum=0.1))
+    
+    # Load pre-trained model if available
+    if os.path.exists(args.pretrained):
+        print(f"[INFO] Loading pre-trained model from {args.pretrained}")
+        net = load_model_with_mismatch(net, args.pretrained, device)
+    
+    # Create datasets
+    if args.train or args.eval:
+        # Use 70% of train cities for training, 30% for validation
+        train_cities = TRAIN_CITIES[:10]  # Use first 10 cities for training
+        val_cities = TRAIN_CITIES[10:]    # Use remaining cities for validation
+        
+        print(f"[INFO] Creating datasets with {len(train_cities)} train cities and {len(val_cities)} val cities")
+        # Remove the strong_augment parameter
+        train_ds = ChangeDetectionDataset(args.root, train_cities, augment=True, require_mask=True)
+        val_ds = ChangeDetectionDataset(args.root, val_cities, augment=False, require_mask=True)
+        
+        print(f"[INFO] Train samples: {len(train_ds)}, Val samples: {len(val_ds)}")
+        
+        # Create data loaders with optimized settings
+        train_loader = DataLoader(
+            train_ds,
+            batch_size=args.batch_size,
+            shuffle=True,
+            num_workers=0,  # Required for MPS compatibility
+            pin_memory=False  # Disable pin_memory for MPS
+        )
+        val_loader = DataLoader(
+            val_ds,
+            batch_size=1,
+            shuffle=False,
+            num_workers=0,  # Required for MPS compatibility
+            pin_memory=False  # Disable pin_memory for MPS
+        )
+    
+    # Train the model
+    if args.train:
+        net, val_metrics = train_model(net, train_loader, val_loader, device, args)
+    
+    # Evaluate on validation set
+    if args.eval and not args.train:
+        print("[INFO] Evaluating model on validation set")
+        val_metrics, _ = evaluate_model(
+            net, val_loader, device, 
+            desc="Validation",
+            save_path=f"{args.output}/validation"
+        )
+    
+    # Test on test set
+    if args.test:
+        print("[INFO] Testing model on test set")
+        test_ds = ChangeDetectionDataset(args.root, TEST_CITIES, augment=False, require_mask=True)
+        test_loader = test_ds.get_loader(batch_size=1)
+        
+        test_metrics, _ = evaluate_model(
+            net, test_loader, device, 
+            desc="Test",
+            save_path=f"{args.output}/test"
+        )
+
+if __name__ == '__main__':
+    main()
